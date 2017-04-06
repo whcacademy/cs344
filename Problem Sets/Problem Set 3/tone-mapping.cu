@@ -80,8 +80,9 @@
 */
 
 
-#include "reference_calc.cpp"
+#include "reference_calc.h"
 #include "utils.h"
+#include <stdio.h>
 
 __global__
 void reduceMax(const float* const d_logLuminance,
@@ -100,12 +101,12 @@ void reduceMax(const float* const d_logLuminance,
 
   // put another half of the data
 
-  for (int s = blockDim.x / 2;  s > 0; s/=2){
+  for (int s = blockDim.x / 2;  s > 0; s>>1){
     if (tid<s){
       if (myID+s >= numElems){
         continue;
       }else{
-        sdata[tid] = max(sdata[tid], d_logLuminance[myID+s]);
+        sdata[tid] = max(sdata[tid], sdata[tid+s]);
       }
       __syncthreads();
     }
@@ -133,12 +134,12 @@ void reduceMax(const float* const d_logLuminance,
 
   // put another half of the data
   
-  for (int s = blockDim.x / 2; s > 0; s/=2){
+  for (int s = blockDim.x / 2; s > 0; s>>1){
     if (tid<s){
       if (myID+s >= numElems){
         continue;
       }else{
-        sdata[tid] = min(sdata[tid], d_logLuminance[myID+s]);
+        sdata[tid] = min(sdata[tid], sdata[tid+s]);
       }
       __syncthreads();
     }
@@ -231,6 +232,9 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
   // find the minmum and maximum
   min_logLum = findMin(d_logLuminance, numRows*numCols);
   max_logLum = findMax(d_logLuminance, numRows*numCols);
+
+  printf("gg_logLumMax%lld\n", min_logLum);
+  printf("gg_logLumMin%lld\n", max_logLum);
 
   // find range
   float lumRange = max_logLum - min_logLum;

@@ -6,7 +6,7 @@
 
   A High Dynamic Range (HDR) image contains a wider variation of intensity
   and color than is allowed by the RGB format with 1 byte per channel that we
-  have used in the previous assignment.  
+  have used in the previous assignment.
 
   To store this extra information we use single precision floating point for
   each channel.  This allows for an extremely wide range of intensity values.
@@ -53,7 +53,7 @@
   Old TV signals used to be transmitted in this way so that black & white
   televisions could display the luminance channel while color televisions would
   display all three of the channels.
-  
+
 
   Tone-mapping
   ============
@@ -79,8 +79,137 @@
 
 */
 
-#include "utils.h"
 
+#include "reference_calc.h"
+#include "utils.h"
+#include <stdio.h>
+
+__global__
+void reduceMax(const float* const d_logLuminance,
+               float* const d_output,
+               const size_t numElems)
+{
+  // get position put corresponding data into the position
+  int tid = threadIdx.x;
+  int myID = gridDim.x*blockIdx.x+ tid;
+  if (myID >= numElems){
+    return;
+  }
+  extern __shared__ float sdata[];
+  sdata[tid] = d_logLuminance[myID];
+  __syncthreads();
+
+  // put another half of the data
+
+  for (int s = blockDim.x / 2;  s > 0; s/=2){
+    if (tid<s){
+      if (myID+s >= numElems){
+        continue;
+      }else{
+        sdata[tid] = max(sdata[tid], sdata[tid+s]);
+      }
+      __syncthreads();
+    }
+  }
+  if (tid == 0){
+    d_output[blockIdx.x] = sdata[tid];
+  }
+}
+
+
+ __global__
+ void reduceMin(const float* const d_logLuminance,
+                float* const d_output,
+                const size_t numElems)
+{
+  // get position put corresponding data into the position
+  int tid = threadIdx.x;
+  int myID = gridDim.x*blockIdx.x + tid;
+  if (myID >= numElems){
+    return;
+  }
+  extern __shared__ float sdata[];
+  sdata[tid] = d_logLuminance[myID];
+  __syncthreads();
+
+  // put another half of the data
+  
+  for (int s = blockDim.x / 2; s > 0; s/=2){
+    if (tid<s){
+      if (myID+s >= numElems){
+        continue;
+      }else{
+        sdata[tid] = min(sdata[tid], sdata[tid+s]);
+      }
+      __syncthreads();
+    }
+  }
+  if (tid == 0){
+    d_output[blockIdx.x] = sdata[tid];
+  }
+
+
+
+}
+
+__global__
+void histogram(const float* const d_logLuminance,
+               unsigned int* const d_histogram,
+               const float lumMin,
+               const float lumRange,
+               const size_t numBins,
+               const size_t numElems)
+{
+  // perform naive atomic add first
+  size_t myID = gridDim.x*blockIdx.x + threadIdx.x;
+  if (myID>=numElems){
+    return;
+  }
+
+  float data = d_logLuminance[myID];
+  size_t bin = (data - lumMin) / lumRange * numBins;
+  atomicAdd(d_histogram+bin,(unsigned int)1);
+}
+
+float findMax(const float* const d_logLuminance,
+              const size_t numElems)
+{
+  // gpu computation
+  int blockSize = 512;
+  int gridSize = numElems/blockSize + 1;
+  float * d_output, *h_output;
+  h_output = (float*)malloc(gridSize*sizeof(float));
+  checkCudaErrors(cudaMalloc(&d_output, gridSize*sizeof(float)));
+  checkCudaErrors(cudaMemset(d_output, 0, gridSize*sizeof(float)));
+  reduceMax<<<gridSize, blockSize, blockSize*sizeof(float)>>>(d_logLuminance, d_output, numElems);
+  checkCudaErrors(cudaMemcpy(h_output, d_output, gridSize*sizeof(float), cudaMemcpyDeviceToHost));
+  // cpu computation
+  float max_logLum = h_output[0];
+  for (int i= 1; i < gridSize; ++i){
+    max_logLum = max(max_logLum, h_output[i]);
+  }
+  return max_logLum;
+}
+
+float findMin(const float* const d_logLuminance,
+              const size_t numElems)
+{
+  // gpu computation
+  int blockSize = 512;
+  int gridSize = numElems/blockSize + 1;
+  float * d_output, *h_output;
+  h_output = (float*)malloc(gridSize*sizeof(float));
+  checkCudaErrors(cudaMalloc(&d_output, gridSize*sizeof(float)));
+  checkCudaErrors(cudaMemset(d_output, 0, gridSize*sizeof(float)));
+  reduceMin<<<gridSize, blockSize, blockSize*sizeof(float)>>>(d_logLuminance, d_output, numElems);
+  checkCudaErrors(cudaMemcpy(h_output, d_output, gridSize*sizeof(float), cudaMemcpyDeviceToHost));
+  // cpu computation
+  float min_logLum = h_output[0];
+  for (int i= 1; i < gridSize; ++i){
+    min_logLum = min(min_logLum, h_output[i]);
+  }
+  return min_logLum;
+}
 void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                   unsigned int* const d_cdf,
                                   float &min_logLum,
@@ -100,5 +229,36 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
        the cumulative distribution of luminance values (this should go in the
        incoming d_cdf pointer which already has been allocated for you)       */
 
+  // find the minmum and maximum
+  min_logLum = findMin(d_logLuminance, numRows*numCols);
+  max_logLum = findMax(d_logLuminance, numRows*numCols);
+
+  printf("gg_logLumMax%f\n", min_logLum);
+  printf("gg_logLumMin%f\n", max_logLum);
+
+  // find range
+  float lumRange = max_logLum - min_logLum;
+
+  // generate bins and find the histogram
+  unsigned int * d_histogram;
+  checkCudaErrors(cudaMalloc(&d_histogram, sizeof(unsigned int)*numBins));
+  checkCudaErrors(cudaMemset(d_histogram,0, sizeof(unsigned int)*numBins));
+  int blockSize = 512;
+  int gridSize = numRows*numCols/blockSize + 1;
+  histogram<<<gridSize, blockSize>>>(d_logLuminance, d_histogram, min_logLum, lumRange, numBins, numRows*numCols);
+
+  // test above three cuda function is correct or not
+  // sequential cdf
+  unsigned int * h_histogram = (unsigned int*)malloc(sizeof(unsigned int)*numBins);
+  checkCudaErrors(cudaMemcpy(h_histogram, d_histogram, sizeof(unsigned int)*numBins, cudaMemcpyDeviceToHost));
+  unsigned int* h_cdf = (unsigned int*)malloc(sizeof(unsigned int)*numBins);
+  h_cdf[0] = h_histogram[0];
+  for (int i = 1; i < numBins; ++i){
+    h_cdf[i] = h_cdf[i-1]+h_histogram[i];
+  }
+  checkCudaErrors(cudaMemcpy(d_cdf, h_cdf, sizeof(unsigned int)*numBins, cudaMemcpyHostToDevice));
+  // use d_histogram to generate d_cdf
+  //exclusiveScanPlus<<<>>>(d_histogram, d_cdf)
 
 }
+
