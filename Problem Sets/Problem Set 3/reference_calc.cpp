@@ -15,11 +15,8 @@ void referenceCalculation(const float* const h_logLuminance, unsigned int* const
     logLumMax = std::max(h_logLuminance[i], logLumMax);
   }
 
-  printf("logLumMax%f\n", logLumMax);
-  printf("logLumMin%f\n", logLumMin);
   //Step 2
   float logLumRange = logLumMax - logLumMin;
-
   //Step 3
   //next we use the now known range to compute
   //a histogram of numBins bins
@@ -32,6 +29,8 @@ void referenceCalculation(const float* const h_logLuminance, unsigned int* const
                            static_cast<unsigned int>((h_logLuminance[i] - logLumMin) / logLumRange * numBins));
     histo[bin]++;
   }
+
+
 
   //Step 4
   //finally we perform and exclusive scan (prefix sum)

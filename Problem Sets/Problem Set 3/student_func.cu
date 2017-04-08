@@ -124,7 +124,7 @@ void reduceMax(const float* const d_logLuminance,
 {
   // get position put corresponding data into the position
   int tid = threadIdx.x;
-  int myID = gridDim.x*blockIdx.x + tid;
+  int myID = blockIdx.x*blockIdx.x + tid;
   if (myID >= numElems){
     return;
   }
@@ -147,9 +147,6 @@ void reduceMax(const float* const d_logLuminance,
   if (tid == 0){
     d_output[blockIdx.x] = sdata[tid];
   }
-
-
-
 }
 
 __global__
@@ -161,16 +158,84 @@ void histogram(const float* const d_logLuminance,
                const size_t numElems)
 {
   // perform naive atomic add first
-  size_t myID = gridDim.x*blockIdx.x + threadIdx.x;
+  size_t myID = blockDim.x*blockIdx.x + threadIdx.x;
   if (myID>=numElems){
     return;
   }
 
   float data = d_logLuminance[myID];
-  size_t bin = (data - lumMin) / lumRange * numBins;
-  atomicAdd(d_histogram+bin,(unsigned int)1);
+  // problem would happen if the bin number exceed the largest one
+
+  unsigned int bin = min(static_cast<unsigned int>(numBins - 1),
+                           static_cast<unsigned int>((data - lumMin) / lumRange * numBins));
+  atomicAdd(d_histogram+bin,1);
 }
 
+
+__global__
+void exclusiveScanPlus(unsigned int* const d_histogram,
+                       unsigned int* d_cdf,
+                       int numBins)
+{
+  // here we perform blelloc scan
+  extern __shared__ unsigned int shdata[];
+
+  // load data
+  int tid = threadIdx.x;
+  int myID = blockDim.x * blockIdx.x + threadIdx.x;
+  shdata[tid] = d_histogram[myID];
+  __syncthreads();
+
+  // first half: reduction
+  
+  for (size_t s = (blockDim.x >>1); s > 0; s>>=1){
+    if (tid < s){
+      int stride = blockDim.x / s;
+      int index = (tid+1)*stride -1;
+      shdata[index] = shdata[index] + shdata[(index - (stride>>1))];
+    }
+    __syncthreads();
+    
+  }
+  
+
+  // make the last element to become zero
+  if (tid == blockDim.x - 1){
+    shdata[tid] = 0;
+  }
+  __syncthreads();
+
+  // second half: post reduction
+  for (size_t s = 1; s < blockDim.x; s<<=1){
+    if (tid < s){
+      int stride = (blockDim.x)/s;
+      int index = (tid+1)*stride - 1;
+      unsigned int smallIdxVal = shdata[index];
+      unsigned int largeIdxVal = shdata[index] + shdata[index - (stride>>1)]; 
+      shdata[index-(stride>>1)] = smallIdxVal;
+      shdata[index] = largeIdxVal;
+    }
+    __syncthreads();
+
+  }
+
+  // copy to the result array
+  d_cdf[myID] = shdata[tid];
+  __syncthreads();
+
+  // deal with different block
+  unsigned int offset = 0;
+  if (blockIdx.x > 0){
+    for (int i = 0; i < blockIdx.x; ++i){
+      // note here we do not store back data
+      offset += d_cdf[(i+1)*blockDim.x - 1];
+    }
+    __syncthreads();
+    d_cdf[myID] = d_cdf[myID] + offset;
+  }
+
+  
+}
 float findMax(const float* const d_logLuminance,
               const size_t numElems)
 {
@@ -233,32 +298,23 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
   min_logLum = findMin(d_logLuminance, numRows*numCols);
   max_logLum = findMax(d_logLuminance, numRows*numCols);
 
-  printf("gg_logLumMax%f\n", min_logLum);
-  printf("gg_logLumMin%f\n", max_logLum);
 
   // find range
   float lumRange = max_logLum - min_logLum;
-
   // generate bins and find the histogram
   unsigned int * d_histogram;
   checkCudaErrors(cudaMalloc(&d_histogram, sizeof(unsigned int)*numBins));
   checkCudaErrors(cudaMemset(d_histogram,0, sizeof(unsigned int)*numBins));
   int blockSize = 512;
-  int gridSize = numRows*numCols/blockSize + 1;
+  int gridSize = (numRows*numCols-1)/blockSize + 1;
   histogram<<<gridSize, blockSize>>>(d_logLuminance, d_histogram, min_logLum, lumRange, numBins, numRows*numCols);
 
-  // test above three cuda function is correct or not
-  // sequential cdf
-  unsigned int * h_histogram = (unsigned int*)malloc(sizeof(unsigned int)*numBins);
-  checkCudaErrors(cudaMemcpy(h_histogram, d_histogram, sizeof(unsigned int)*numBins, cudaMemcpyDeviceToHost));
-  unsigned int* h_cdf = (unsigned int*)malloc(sizeof(unsigned int)*numBins);
-  h_cdf[0] = h_histogram[0];
-  for (int i = 1; i < numBins; ++i){
-    h_cdf[i] = h_cdf[i-1]+h_histogram[i];
-  }
-  checkCudaErrors(cudaMemcpy(d_cdf, h_cdf, sizeof(unsigned int)*numBins, cudaMemcpyHostToDevice));
+  gridSize = (numBins-1)/ blockSize + 1;
   // use d_histogram to generate d_cdf
-  //exclusiveScanPlus<<<>>>(d_histogram, d_cdf)
+  exclusiveScanPlus<<<gridSize, blockSize, sizeof(unsigned int)*blockSize>>>(d_histogram, d_cdf, numBins);
+  unsigned int * h_cdf = (unsigned int*)malloc(sizeof(unsigned int)*numBins);
+  checkCudaErrors(cudaMemcpy(h_cdf,d_cdf, sizeof(unsigned int)*numBins, cudaMemcpyDeviceToHost));
+
 
 }
 
