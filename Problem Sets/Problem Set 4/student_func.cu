@@ -3,7 +3,10 @@
 
 #include "utils.h"
 #include <thrust/host_vector.h>
-
+#include <climits>
+#include <math.h>
+#include <stdio.h>
+#include <iostream>
 /* Red Eye Removal
    ===============
    
@@ -43,6 +46,202 @@
  */
 
 
+__global__
+void RadixSort(unsigned int* const d_inputVals,
+               unsigned int* const d_inputPos,
+               unsigned int* const d_outputVals,
+               unsigned int* const d_outputPos,
+               const size_t numElems)
+{
+	extern __shared__ unsigned int shdata[];
+	unsigned int mask = 1;
+	int upperLimit = int(log2(float(UINT_MAX)));
+	int tid = threadIdx.x;
+	int myID = blockDim.x * blockIdx.x + threadIdx.x;
+	if (myID >= numElems){
+		return;
+	}
+	for (int i = 0; i < upperLimit; ++i){
+		if (i>0){
+			mask<<=1;
+		}
+		// get the corresponding bit
+		// from input to output
+
+		
+
+		if (i%2 == 0){
+			unsigned int digit = d_inputVals[myID] & mask;
+			// calculate prefix sum
+
+			// 1. copy the data
+			d_outputPos[myID] = digit;
+			__syncthreads();
+			// 2. do prefix sum -> code for blelloch scan
+
+
+		  // load data
+		  shdata[tid] = digit;
+		  __syncthreads();
+
+		  // first half: reduction
+		  
+		  for (size_t s = (blockDim.x >>1); s > 0; s>>=1){
+		    if (tid < s){
+		      int stride = blockDim.x / s;
+		      int index = (tid+1)*stride -1;
+		      shdata[index] = shdata[index] + shdata[(index - (stride>>1))];
+		    }
+		    __syncthreads();
+		    
+		  }
+		  
+
+		  // make the last element to become zero
+		  if (tid == blockDim.x - 1){
+		    shdata[tid] = 0;
+		  }
+		  __syncthreads();
+
+		  // second half: post reduction
+		  for (size_t s = 1; s < blockDim.x; s<<=1){
+		    if (tid < s){
+		      int stride = (blockDim.x)/s;
+		      int index = (tid+1)*stride - 1;
+		      unsigned int smallIdxVal = shdata[index];
+		      unsigned int largeIdxVal = shdata[index] + shdata[index - (stride>>1)]; 
+		      shdata[index-(stride>>1)] = smallIdxVal;
+		      shdata[index] = largeIdxVal;
+		    }
+		    __syncthreads();
+
+		  }
+
+		  // copy to the result array
+		  d_outputPos[myID] = shdata[tid];
+		  __syncthreads();
+
+		  // deal with different block
+		  unsigned int offset = 0;
+		  if (blockIdx.x > 0){
+		    for (int i = 0; i < blockIdx.x; ++i){
+		      // note here we do not store back data
+		      // offset += 267;// max(offset, d_outputPos[(i+1)*blockDim.x - 1]);
+		      offset =  d_outputPos[(i+1)*blockDim.x - 1];
+		      // if (i>tid){
+		      // 	break;
+		      // }
+		    }
+		    __syncthreads();
+
+	    	d_outputPos[myID] = offset;
+			
+		  	__syncthreads();
+			return;
+
+			// get prefix sum at output_Vals
+
+		  	// histogram of 0 and 1
+			if (digit % 2 == 0){
+				atomicAdd(&d_outputVals[0], 1);
+			}
+			__syncthreads();
+			if (digit % 2 == 1){
+				d_outputPos[myID] += d_outputVals[0];
+			}
+			__syncthreads();
+			// move data	
+			// d_outputVals[d_outputPos[myID]] = d_inputVals[myID];
+			// d_outputPos[d_outputPos[myID]]  = d_inputPos[myID];
+			__syncthreads();
+
+		}
+		// from output to input
+		else{
+			unsigned int digit = d_outputVals[myID] & mask;
+			// calculate prefix sum
+
+			// 1. copy the data
+			d_inputPos[myID] = digit;
+			__syncthreads();
+			// 2. do prefix sum -> code for blelloch scan
+
+
+		  // load data
+		 //  shdata[tid] = d_inputPos[myID];
+		 //  __syncthreads();
+
+		 //  // first half: reduction
+		  
+		 //  for (size_t s = (blockDim.x >>1); s > 0; s>>=1){
+		 //    if (tid < s){
+		 //      int stride = blockDim.x / s;
+		 //      int index = (tid+1)*stride -1;
+		 //      shdata[index] = shdata[index] + shdata[(index - (stride>>1))];
+		 //    }
+		 //    __syncthreads();
+		    
+		 //  }
+		  
+
+		 //  // make the last element to become zero
+		 //  if (tid == blockDim.x - 1){
+		 //    shdata[tid] = 0;
+		 //  }
+		 //  __syncthreads();
+
+		 //  // second half: post reduction
+		 //  for (size_t s = 1; s < blockDim.x; s<<=1){
+		 //    if (tid < s){
+		 //      int stride = (blockDim.x)/s;
+		 //      int index = (tid+1)*stride - 1;
+		 //      unsigned int smallIdxVal = shdata[index];
+		 //      unsigned int largeIdxVal = shdata[index] + shdata[index - (stride>>1)]; 
+		 //      shdata[index-(stride>>1)] = smallIdxVal;
+		 //      shdata[index] = largeIdxVal;
+		 //    }
+		 //    __syncthreads();
+
+		 //  }
+
+		 //  // copy to the result array
+		 //  d_inputPos[myID] = shdata[tid];
+		 //  __syncthreads();
+
+		 //  // deal with different block
+		 //  unsigned int offset = 0;
+		 //  if (blockIdx.x > 0){
+		 //    for (int i = 0; i < blockIdx.x; ++i){
+		 //      // note here we do not store back data
+		 //      offset += d_inputPos[(i+1)*blockDim.x - 1];
+		 //    }
+		 //    __syncthreads();
+		 //    d_inputPos[myID] = d_inputPos[myID] + offset;
+		 //  }
+
+			// // get prefix sum at output_Vals
+
+		 //  	// histogram of 0 and 1
+			// if (digit % 2 == 0){
+			// 	atomicAdd(&d_inputVals[0], 1);
+			// }
+			// __syncthreads();
+			// if (digit % 2 == 1){
+			// 	d_inputPos[myID] += d_inputVals[0];
+			// }
+			// __syncthreads();
+
+			// // move data
+			// d_inputVals[d_inputPos[myID]] = d_outputVals[myID];
+			// d_inputPos[d_inputPos[myID]]  = d_outputPos[myID];
+			// __syncthreads();
+		}
+
+	}
+
+}
+
+
 void your_sort(unsigned int* const d_inputVals,
                unsigned int* const d_inputPos,
                unsigned int* const d_outputVals,
@@ -51,4 +250,14 @@ void your_sort(unsigned int* const d_inputVals,
 { 
   //TODO
   //PUT YOUR SORT HERE
+
+	int blockSize = 512;
+	int gridSzie = (numElems - 1)/blockSize + 1;
+	RadixSort<<<gridSzie, blockSize, sizeof(unsigned int)*blockSize>>>(d_inputVals, d_inputPos, d_outputVals, d_outputPos, numElems);
+	unsigned int * h_ouputPos = (unsigned int*)malloc(sizeof(unsigned int)*numElems);
+	checkCudaErrors(cudaMemcpy(h_ouputPos, d_outputPos, numElems*sizeof(unsigned int), cudaMemcpyDeviceToHost));
+	for (size_t i = 0; i<numElems; ++i){
+		std::cout<< h_ouputPos[i] <<std::endl;
+	}
+
 }

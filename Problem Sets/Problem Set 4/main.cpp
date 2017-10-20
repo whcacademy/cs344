@@ -68,6 +68,7 @@ int main(int argc, char **argv) {
   GpuTimer timer;
   timer.Start();
 
+
   //call the students' code
   your_sort(inputVals, inputPos, outputVals, outputPos, numElems);
 
